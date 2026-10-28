@@ -113,6 +113,18 @@ databazeknih.cz pages captured on 2026-10-28: a search for "Zaklínač", the pri
 are cut down to the parts the provider reads, plus the site's summary of reader comments next to
 the description, which the tests check stays out of it.
 
+Those fixtures do not change when databazeknih.cz does, so live tests check the real site too:
+well-known books keep their title, author, series, pages, ISBN, cover, narrators and running time,
+an ISBN search lands on its edition, and an unknown id is not found. `cargo test` skips them; run
+them with:
+
+```bash
+cargo test live -- --ignored --test-threads=1
+```
+
+The `Live` workflow runs them every day and on demand, about fifteen requests to the site, and
+GitHub emails a failure. Each check names the part of the page it reads, such as `series box`.
+
 Before a release, check it with BookOrbit's conformance checker:
 
 ```bash

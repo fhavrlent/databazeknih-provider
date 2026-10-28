@@ -1,4 +1,6 @@
 mod databazeknih;
+#[cfg(test)]
+mod live_tests;
 mod mapping;
 mod server;
 
