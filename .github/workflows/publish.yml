@@ -40,8 +40,23 @@ jobs:
             echo "image=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/databazeknih-provider"
           } >> "$GITHUB_OUTPUT"
 
+  # Nothing is built unless the code passes every check, offline and against the real site.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      # One test at a time, so the site sees one provider's worth of requests.
+      - run: cargo test live -- --ignored --test-threads=1
+
   build:
-    needs: release
+    needs: [release, test]
     strategy:
       matrix:
         include:

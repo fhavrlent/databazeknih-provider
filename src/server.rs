@@ -17,8 +17,8 @@ use crate::databazeknih::{
     is_unknown_book_redirect, path_of, Client, Page, UpstreamError,
 };
 use crate::mapping::{
-    map_book, parse_book_page, parse_more_info, rank, says_nothing_found, search_results,
-    BookMetadata, MoreInfo,
+    map_book, parse_book_page, parse_more_info, rank, same_isbn, says_nothing_found,
+    search_results, BookMetadata, MoreInfo,
 };
 use crate::{Config, VERSION};
 
@@ -89,8 +89,18 @@ async fn search(
         return denied;
     }
     let param = |key: &str| q.get(key).map(|v| v.trim()).unwrap_or_default();
-    let (phrase, isbn) = (param("query"), normalize_isbn(param("isbn")));
+    let phrase = param("query");
+    let given_isbn = normalize_isbn(param("isbn"));
+    let isbn = given_isbn.clone().filter(|isbn| !is_placeholder_isbn(isbn));
     if phrase.is_empty() && isbn.is_none() {
+        // A placeholder ISBN is a book without one: nothing to search, not a bad request.
+        if given_isbn.is_some() {
+            return Json(SearchResponse {
+                matches: vec![],
+                partial: false,
+            })
+            .into_response();
+        }
         return error(StatusCode::BAD_REQUEST, "query is required");
     }
     let limit = param("limit")
@@ -125,11 +135,16 @@ async fn search_books(
     if let Some(isbn) = isbn {
         let page = search_page(state, isbn, deadline).await?;
         if is_book_page(&page.url) {
-            return landed_on_book(state, page, Some(isbn), deadline).await;
-        }
-        // Results for an ISBN that did not land on a book share its digits by chance, so only
-        // a page that says it found nothing, or that lists books, is understood.
-        if !says_nothing_found(&page.body) && search_results(&page.body).is_empty() {
+            let answer = landed_on_book(state, page, Some(isbn), deadline).await?;
+            // The site's ISBN search is not exact: an unknown ISBN can land on a book whose
+            // recorded ISBN is junk such as "000-000-000". Only an edition that lists the ISBN is
+            // its match; anything else is an ISBN the site does not know.
+            if answer.matches.iter().any(|book| lists_isbn(book, isbn)) {
+                return Ok(answer);
+            }
+        } else if !says_nothing_found(&page.body) && search_results(&page.body).is_empty() {
+            // Results for an ISBN that did not land on a book share its digits by chance, so
+            // only a page that says it found nothing, or that lists books, is understood.
             return Err(not_understood(&page));
         }
         if phrase.is_empty() {
@@ -224,6 +239,10 @@ async fn landed_on_book(
         )),
         Err(err) => Err(err),
     }
+}
+
+fn lists_isbn(book: &BookMetadata, isbn: &str) -> bool {
+    same_isbn(&book.isbn13, isbn) || same_isbn(&book.isbn10, isbn)
 }
 
 fn not_understood(page: &Page) -> UpstreamError {
@@ -345,6 +364,17 @@ fn normalize_isbn(raw: &str) -> Option<String> {
         _ => false,
     };
     valid.then_some(isbn)
+}
+
+/// An ISBN of zeros, such as `0000000000` or `9780000000002`, that badly tagged files carry for
+/// "no ISBN". The site stores some books under such placeholders too, so searching one would
+/// answer an unrelated book.
+fn is_placeholder_isbn(isbn: &str) -> bool {
+    let body = match isbn.len() {
+        13 => &isbn[3..12],
+        _ => &isbn[..9],
+    };
+    body.bytes().all(|b| b == b'0')
 }
 
 /// Status codes are part of the contract: a client backs off on 429 and treats 5xx as a failure,
@@ -837,6 +867,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_isbn_search_that_lands_on_a_book_without_that_isbn_is_no_match() {
+        // Seen on databazeknih.cz: 9780000000002 lands on a book recorded with ISBN 000-000-000.
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/vyhledavani/knihy?q=9780000000002&lang=czsk".into(),
+            (
+                302,
+                "redirect:/prehled-knihy/pred-ocima-vesnice-370474".into(),
+            ),
+        );
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/pred-ocima-vesnice-370474".into(),
+            (
+                200,
+                r#"<div id="bookDetail"><h1 class="oddown_zero">Před očima vesnice</h1></div>
+                <script type="application/ld+json">{ "@type": "Book", "isbn": "000-000-000",
+                "url": "https://www.databazeknih.cz/prehled-knihy/pred-ocima-vesnice-370474" }</script>"#
+                    .into(),
+            ),
+        );
+        fake.pages.lock().unwrap().insert(
+            "/book-detail-more-info/370474".into(),
+            (200, "<dt>ISBN</dt><dd>000-000-000</dd>".into()),
+        );
+        let base = provider(fake).await;
+        let (status, body, _) = get(&base, "/search?isbn=9780000000002", None).await;
+        assert_eq!((status, matches(&body).len()), (200, 0), "{body}");
+        // With a title, the title is searched instead.
+        let (status, body, _) = get(
+            &base,
+            "/search?isbn=9780000000002&query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(matches(&body)[0]["title"], "Poslední přání");
+    }
+
+    #[tokio::test]
+    async fn an_isbn_13_search_matches_an_edition_that_lists_its_isbn_10() {
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/vyhledavani/knihy?q=9788085951141&lang=czsk".into(),
+            (
+                302,
+                "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            ),
+        );
+        let base = provider(fake).await;
+        let (status, body, _) = get(&base, "/search?isbn=978-80-85951-14-1", None).await;
+        assert_eq!((status, matches(&body).len()), (200, 1), "{body}");
+        assert_eq!(matches(&body)[0]["isbn10"], "8085951142");
+    }
+
+    #[tokio::test]
     async fn an_isbn_search_reports_the_searched_isbn_of_an_edition_with_two() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
@@ -1050,5 +1135,38 @@ mod tests {
         );
         assert_eq!(normalize_isbn("abc"), None);
         assert_eq!(normalize_isbn(""), None);
+    }
+
+    #[test]
+    fn placeholder_isbns_are_told_apart() {
+        for placeholder in ["0000000000", "9780000000002", "9790000000001"] {
+            assert!(is_placeholder_isbn(placeholder), "{placeholder}");
+        }
+        for real in ["8085951142", "9788074770791", "0261102214", "9780261102217"] {
+            assert!(!is_placeholder_isbn(real), "{real}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_placeholder_isbn_is_not_searched() {
+        let fake = sapkowski_site();
+        let base = provider(fake.clone()).await;
+        let (status, body, _) = get(&base, "/search?isbn=0000000000", None).await;
+        assert_eq!((status, matches(&body).len()), (200, 0));
+        assert!(fake.requests().is_empty(), "{:?}", fake.requests());
+        // With a title, only the title is searched.
+        let (status, body, _) = get(
+            &base,
+            "/search?isbn=978-0-00-000000-2&query=x&author=Sapkowski&limit=1",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(matches(&body)[0]["title"], "Poslední přání");
+        assert!(
+            !fake.requests().iter().any(|r| r.contains("q=978")),
+            "{:?}",
+            fake.requests()
+        );
     }
 }

@@ -197,6 +197,60 @@ async fn live_a_search_with_no_results_says_so() {
 
 #[tokio::test]
 #[ignore = "hits databazeknih.cz"]
+async fn live_a_made_up_isbn_finds_nothing() {
+    let base = provider().await;
+    // The site's ISBN search lands this one on a book recorded with ISBN 000-000-000.
+    let body = get(&base, "/search?isbn=9780000000002").await;
+    assert!(matches(&body).is_empty(), "{body}");
+    // The site stores "Artefakty v Čechách" under the placeholder 0000000000.
+    let body = get(&base, "/search?isbn=0000000000").await;
+    assert!(matches(&body).is_empty(), "{body}");
+    // With a title, the title is searched instead of answering the wrong book.
+    let body = get(
+        &base,
+        "/search?isbn=9780000000002&query=Krakatit&author=Karel%20%C4%8Capek&limit=1",
+    )
+    .await;
+    assert_eq!(matches(&body)[0]["title"], "Krakatit", "{body}");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_isbn_matches_list_the_searched_isbn() {
+    let base = provider().await;
+    // ISBN-10 and ISBN-13 forms, real and made up: whatever comes back must list the ISBN.
+    for (isbn, edition) in [
+        ("8085951142", Some("zaklinac-zaklinac-posledni-prani-30396")),
+        ("9788074770791", Some("posledni-prani-497285")),
+        ("9788085951141", None),
+        ("9780000000002", None),
+        ("0000000000", None),
+    ] {
+        let body = get(&base, &format!("/search?isbn={isbn}")).await;
+        for book in matches(&body) {
+            let listed = [&book["isbn13"], &book["isbn10"]]
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|found| crate::mapping::same_isbn(found, isbn));
+            assert!(listed, "{isbn} answered a book without it: {book}");
+        }
+        if let Some(edition) = edition {
+            assert_eq!(matches(&body).len(), 1, "{isbn}: {body}");
+            assert_eq!(matches(&body)[0]["providerId"], edition, "{isbn}");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_comics_are_marked_as_comics() {
+    let base = provider().await;
+    let book = get(&base, "/book/krakatit-komiks-24657").await;
+    assert_eq!(book["mediaType"], "comic", "{book}");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
 async fn live_unknown_id_is_not_found() {
     let base = provider().await;
     let res = reqwest::get(format!("{base}/book/999999999"))

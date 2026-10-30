@@ -16,7 +16,7 @@ Beside BookOrbit, on the same Docker network:
 ```yaml
 services:
   databazeknih:
-    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.1
+    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.2
     restart: unless-stopped
 ```
 
@@ -30,7 +30,7 @@ has the steps. No account or key is needed. To build it yourself:
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | unset | When set, `/search` and `/book/{id}` require this exact `Authorization` header |
 | `DATABAZEKNIH_SITE` | `https://www.databazeknih.cz` | Where pages are fetched from; links in answers always point at databazeknih.cz |
-| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.1` | |
+| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.2` | |
 | `DEADLINE_MS` | `8000` | How long a search or lookup may take. A search that runs out answers with the books it has, marked partial. Raise it if you raise the provider's timeout in BookOrbit (10 seconds by default) |
 
 databazeknih.cz is a community site, so the provider sends it at most two requests at a time, at
@@ -67,9 +67,13 @@ is a `502`.
 ## Mapping
 
 - **ISBN search** comes first when BookOrbit sends an ISBN. The site's search sends an ISBN it
-  knows straight to that edition's page, which is the answer. When the edition lists more than
-  one ISBN, the one searched is reported. When the site does not know it, the title is searched
-  instead, or, without a title, the answer is empty.
+  knows straight to that edition's page. That page is the answer only when the edition lists the
+  ISBN (an ISBN-10 and its ISBN-13 count as the same): the site's ISBN search is not exact, and
+  sent `9780000000002` to a book recorded as `000-000-000`. Placeholder ISBNs of zeros, such as
+  `0000000000`, which badly tagged files carry and under which the site stores some books, are not
+  searched at all. When the edition lists more than one ISBN, the one searched is reported. When
+  the site does not know the ISBN, the title is searched instead, or, without a title, the answer
+  is empty.
 - **Title search** asks for the title alone: the site matches titles, and an author in the phrase
   finds fewer of the right books. Results stay in the site's order, except that books by the
   author BookOrbit asked for (by surname, ignoring diacritics and name order) come first, and among
@@ -131,7 +135,7 @@ them with:
 cargo test live -- --ignored --test-threads=1
 ```
 
-The `Live` workflow runs them every day and on demand, about fifteen requests to the site, and
+The `Publish` workflow runs them, with the offline tests, before it builds an image, so a release that fails them is never published. The `Live` workflow runs them every day and on demand, about fifteen requests to the site, and
 GitHub emails a failure. Each check names the part of the page it reads, such as `series box`.
 
 Before a release, check it with BookOrbit's conformance checker:

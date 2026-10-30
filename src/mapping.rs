@@ -591,12 +591,38 @@ fn split_isbn(raw: &str, searched: Option<&str>) -> (String, String) {
         .filter(|isbn| matches!(isbn.len(), 10 | 13))
         .collect();
     let chosen = searched
-        .and_then(|wanted| isbns.iter().find(|isbn| isbn.as_str() == wanted))
+        .and_then(|wanted| isbns.iter().find(|isbn| same_isbn(isbn, wanted)))
         .or(isbns.first());
     match chosen {
         Some(isbn) if isbn.len() == 13 => (String::new(), isbn.clone()),
         Some(isbn) => (isbn.clone(), String::new()),
         None => (String::new(), String::new()),
+    }
+}
+
+/// Whether two ISBNs, without hyphens, name the same book: an ISBN-10 and the ISBN-13 made from
+/// it (`978`, its first nine digits, a new check digit) are the same number.
+pub fn same_isbn(a: &str, b: &str) -> bool {
+    match (as_isbn13(a), as_isbn13(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn as_isbn13(isbn: &str) -> Option<String> {
+    let isbn = isbn.to_uppercase();
+    match isbn.len() {
+        13 if isbn.bytes().all(|b| b.is_ascii_digit()) => Some(isbn),
+        10 if isbn[..9].bytes().all(|b| b.is_ascii_digit()) => {
+            let body = format!("978{}", &isbn[..9]);
+            let sum: u32 = body
+                .bytes()
+                .enumerate()
+                .map(|(i, b)| u32::from(b - b'0') * if i % 2 == 0 { 1 } else { 3 })
+                .sum();
+            Some(format!("{body}{}", (10 - sum % 10) % 10))
+        }
+        _ => None,
     }
 }
 
@@ -897,6 +923,24 @@ mod tests {
         // An ISBN the edition does not list leaves its first one.
         assert_eq!(
             split_isbn(both, Some("9780000000002")),
+            (String::new(), "9788074770791".into())
+        );
+    }
+
+    #[test]
+    fn isbn_10_and_13_name_the_same_book() {
+        // Pairs printed on the books themselves.
+        assert!(same_isbn("0261102214", "9780261102217"));
+        assert!(same_isbn("9780261102217", "0261102214"));
+        assert!(same_isbn("8085951142", "9788085951141"));
+        assert!(same_isbn("080442957X", "9780804429573"));
+        assert!(same_isbn("080442957x", "9780804429573"));
+        assert!(!same_isbn("8085951142", "9788074770791"));
+        assert!(!same_isbn("9780000000002", "000000000"));
+        assert!(!same_isbn("", ""));
+        // The edition's ISBN-13 is reported when the search used its ISBN-10.
+        assert_eq!(
+            split_isbn("80-85951-14-2, 978-80-7477-079-1", Some("9788074770791")),
             (String::new(), "9788074770791".into())
         );
     }

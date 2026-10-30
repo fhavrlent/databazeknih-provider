@@ -7,7 +7,7 @@ mod server;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const VERSION: &str = "0.1.1";
+pub const VERSION: &str = "0.1.2";
 
 pub struct Config {
     pub auth_token: Option<String>,
