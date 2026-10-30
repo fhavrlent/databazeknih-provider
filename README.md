@@ -56,7 +56,9 @@ result, up to eleven requests, about four seconds. An ISBN search is three reque
 Status codes: `400` neither a query nor a valid ISBN, `401` bad token, `404` unknown id, `429` with
 `Retry-After` when databazeknih.cz throttles, `502` when it fails or a page cannot be read. A search
 where some book pages could not be fetched or read still answers `200` with `"partial": true`; one
-where none could answers `502`, never an empty list.
+where none could answers `502`, never an empty list. When the book that ranks first fails to load,
+the search answers `502` (or `429`) rather than a partial answer led by a weaker match, such as a
+novel of the same title by another author; only a first book that is gone from the site is skipped.
 
 BookOrbit remembers an empty search and a `404`, so the provider gives them only when the site says
 so. A search answers empty only when its page says "jsme bohužel nenašli žádný výsledek"; a results

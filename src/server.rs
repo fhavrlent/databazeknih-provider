@@ -177,6 +177,9 @@ async fn search_books(
     }
 
     let mut found: Vec<Option<BookMetadata>> = (0..hits.len()).map(|_| None).collect();
+    // Whether the best-ranked book is gone from the site, as opposed to failing to load.
+    let mut best_gone = false;
+    let mut best_failure = None;
     let mut partial = false;
     let mut failure = None;
     loop {
@@ -184,11 +187,19 @@ async fn search_books(
             Ok(None) => break,
             Ok(Some(Ok((index, result)))) => match result {
                 Ok(Some(book)) => found[index] = Some(book),
-                // A page that is gone or does not parse is skipped.
-                Ok(None) | Err(UpstreamError::NotFound) => partial = true,
+                Err(UpstreamError::NotFound) => {
+                    partial = true;
+                    best_gone |= index == 0;
+                }
+                // A page that does not parse is skipped.
+                Ok(None) => partial = true,
                 Err(err) => {
                     partial = true;
-                    failure.get_or_insert(err);
+                    if index == 0 {
+                        best_failure = Some(err);
+                    } else {
+                        failure.get_or_insert(err);
+                    }
                 }
             },
             Ok(Some(Err(joined))) => {
@@ -202,6 +213,15 @@ async fn search_books(
                 break;
             }
         }
+    }
+
+    // The best match failed to load, by an error or the deadline: the books that did load are the
+    // weaker matches, and the first of them would lead the answer. A failure lets BookOrbit ask
+    // again; a partial answer would put a book of the same title by someone else first.
+    if found.first().is_some_and(Option::is_none) && !best_gone {
+        return Err(best_failure.unwrap_or_else(|| {
+            UpstreamError::Failed("the best-matching book page could not be read".into())
+        }));
     }
 
     let matches: Vec<BookMetadata> = found.into_iter().flatten().collect();
@@ -979,17 +999,106 @@ mod tests {
 
     #[tokio::test]
     async fn a_skipped_book_marks_the_answer_partial() {
+        // The author ranks Sapkowski's book first; the failing one is the weaker match.
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
             "/prehled-knihy/john-sinclair-zaklinac-40113".into(),
             (503, String::new()),
         );
         let base = provider(fake).await;
-        let (status, body, _) = get(&base, "/search?query=x", None).await;
+        let (status, body, _) = get(&base, "/search?query=x&author=Sapkowski", None).await;
         assert_eq!(
             (status, matches(&body).len(), body["partial"].as_bool()),
             (200, 1, Some(true))
         );
+        assert_eq!(matches(&body)[0]["title"], "Poslední přání");
+    }
+
+    #[tokio::test]
+    async fn the_best_match_failing_is_a_failure_not_a_weaker_answer() {
+        // Seen live: the right book's page failed and a novel of the same title by someone else
+        // led the answer. Now the search fails, so BookOrbit asks again.
+        for failure in [503, 500] {
+            let fake = sapkowski_site();
+            fake.pages.lock().unwrap().insert(
+                "/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+                (failure, String::new()),
+            );
+            let base = provider(fake).await;
+            let (status, body, _) = get(
+                &base,
+                "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+                None,
+            )
+            .await;
+            assert_eq!(status, 502, "{failure}: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_best_match_rate_limited_is_passed_on() {
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            (429, String::new()),
+        );
+        let base = provider(fake).await;
+        let (status, _, headers) = get(
+            &base,
+            "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+            None,
+        )
+        .await;
+        assert_eq!(
+            (
+                status,
+                headers.get("retry-after").and_then(|v| v.to_str().ok())
+            ),
+            (429, Some("42"))
+        );
+    }
+
+    #[tokio::test]
+    async fn the_best_match_timing_out_is_a_failure() {
+        let fake = sapkowski_site();
+        fake.delays.lock().unwrap().insert(
+            "/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            Duration::from_secs(3),
+        );
+        let base = provider_at(&fake_site(fake).await, None, Duration::from_millis(700)).await;
+        let started = Instant::now();
+        let (status, _, _) = get(
+            &base,
+            "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+            None,
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(status, 502);
+    }
+
+    #[tokio::test]
+    async fn a_best_match_that_is_gone_leaves_the_others() {
+        // The site sends a removed book to its catalogue: it is gone, not failing, so the rest
+        // of the results stand.
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            (302, "redirect:/knihy".into()),
+        );
+        let base = provider(fake).await;
+        let (status, body, _) = get(
+            &base,
+            "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+            None,
+        )
+        .await;
+        assert_eq!(
+            (status, matches(&body).len(), body["partial"].as_bool()),
+            (200, 1, Some(true)),
+            "{body}"
+        );
+        assert_eq!(matches(&body)[0]["title"], "Na stopě hrůzy");
     }
 
     #[tokio::test]
