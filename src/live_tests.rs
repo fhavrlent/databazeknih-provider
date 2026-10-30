@@ -223,6 +223,10 @@ async fn live_isbn_matches_list_the_searched_isbn() {
         ("8085951142", Some("zaklinac-zaklinac-posledni-prani-30396")),
         ("9788074770791", Some("posledni-prani-497285")),
         ("9788085951141", None),
+        // An edition of "Emma" lists three ISBNs; each finds it and is the one reported.
+        ("978-80-7335-323-0", Some("emma-470637")),
+        ("978-80-7335-520-3", Some("emma-470637")),
+        ("978-80-87440-58-2", Some("emma-470637")),
         ("9780000000002", None),
         ("0000000000", None),
     ] {
@@ -231,7 +235,7 @@ async fn live_isbn_matches_list_the_searched_isbn() {
             let listed = [&book["isbn13"], &book["isbn10"]]
                 .iter()
                 .filter_map(|v| v.as_str())
-                .any(|found| crate::mapping::same_isbn(found, isbn));
+                .any(|found| crate::mapping::same_isbn(found, &isbn.replace('-', "")));
             assert!(listed, "{isbn} answered a book without it: {book}");
         }
         if let Some(edition) = edition {

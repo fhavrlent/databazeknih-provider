@@ -71,7 +71,7 @@ is a `502`.
   ISBN (an ISBN-10 and its ISBN-13 count as the same): the site's ISBN search is not exact, and
   sent `9780000000002` to a book recorded as `000-000-000`. Placeholder ISBNs of zeros, such as
   `0000000000`, which badly tagged files carry and under which the site stores some books, are not
-  searched at all. When the edition lists more than one ISBN, the one searched is reported. When
+  searched at all. About one edition in twenty lists more than one ISBN, often the print and e-book ones, comma-separated in its details (its page's structured data has only the first); the one searched is reported, and without an ISBN search the first. When
   the site does not know the ISBN, the title is searched instead, or, without a title, the answer
   is empty.
 - **Title search** asks for the title alone: the site matches titles, and an author in the phrase

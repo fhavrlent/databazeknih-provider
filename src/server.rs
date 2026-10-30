@@ -922,27 +922,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_isbn_search_reports_the_searched_isbn_of_an_edition_with_two() {
-        let fake = sapkowski_site();
-        fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=8085951142&lang=czsk".into(),
+    async fn an_isbn_search_reports_the_searched_isbn_of_an_edition_with_several() {
+        // A real edition of "Emma" lists three ISBNs in its details; its page's structured data
+        // has only the first. The site's search sends each of them to this edition.
+        let fake = Fake::with(&[
             (
-                302,
-                "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
-            ),
-        );
-        fake.pages.lock().unwrap().insert(
-            "/book-detail-more-info/30396".into(),
-            (
+                "/prehled-knihy/emma-470637",
                 200,
-                "<dt>ISBN</dt><dd>978-80-7477-079-1, 80-85951-14-2</dd>".into(),
+                r#"<div id="bookDetail"><h1 class="oddown_zero">Emma</h1></div>
+                <script type="application/ld+json">{ "@type": "Book", "isbn": "978-80-7335-323-0",
+                "url": "https://www.databazeknih.cz/prehled-knihy/emma-470637" }</script>"#,
             ),
-        );
+            (
+                "/book-detail-more-info/470637",
+                200,
+                include_str!("../testdata/more-470637.html"),
+            ),
+        ]);
+        for isbn in ["9788073353230", "9788073355203", "9788087440582"] {
+            fake.pages.lock().unwrap().insert(
+                format!("/vyhledavani/knihy?q={isbn}&lang=czsk"),
+                (302, "redirect:/prehled-knihy/emma-470637".into()),
+            );
+        }
         let base = provider(fake).await;
-        let (_, body, _) = get(&base, "/search?isbn=8085951142", None).await;
-        let book = &matches(&body)[0];
-        assert_eq!(book["isbn10"], "8085951142");
-        assert!(book.get("isbn13").is_none(), "{book}");
+        for (asked, reported) in [
+            ("978-80-7335-323-0", "9788073353230"),
+            ("978-80-7335-520-3", "9788073355203"),
+            ("978-80-87440-58-2", "9788087440582"),
+        ] {
+            let (status, body, _) = get(&base, &format!("/search?isbn={asked}"), None).await;
+            assert_eq!((status, matches(&body).len()), (200, 1), "{asked}: {body}");
+            assert_eq!(matches(&body)[0]["isbn13"], reported, "{asked}");
+            assert_eq!(matches(&body)[0]["providerId"], "emma-470637");
+        }
     }
 
     #[tokio::test]

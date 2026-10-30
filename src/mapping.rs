@@ -910,6 +910,23 @@ mod tests {
     }
 
     #[test]
+    fn a_real_edition_with_three_isbns() {
+        let more = parse_more_info(include_str!("../testdata/more-470637.html"));
+        assert_eq!(
+            more.isbn,
+            "978-80-7335-323-0, 978-80-7335-520-3, 978-80-87440-58-2"
+        );
+        assert_eq!(
+            split_isbn(&more.isbn, Some("9788087440582")),
+            (String::new(), "9788087440582".into())
+        );
+        assert_eq!(
+            split_isbn(&more.isbn, None),
+            (String::new(), "9788073353230".into())
+        );
+    }
+
+    #[test]
     fn an_edition_with_two_isbns_reports_the_searched_one() {
         let both = "978-80-7477-079-1, 80-85951-14-2";
         assert_eq!(
