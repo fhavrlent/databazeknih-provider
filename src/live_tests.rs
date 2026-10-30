@@ -255,6 +255,93 @@ async fn live_comics_are_marked_as_comics() {
 
 #[tokio::test]
 #[ignore = "hits databazeknih.cz"]
+async fn live_czech_searches_answer_the_sites_own_czech_results() {
+    use crate::databazeknih::{build_search_url, Lang};
+    use crate::mapping::{rank, search_results};
+
+    let base = provider().await;
+    let site = Client::new(
+        SITE,
+        "bookorbit-databazeknih-provider (live check)",
+        1,
+        Duration::from_millis(400),
+    );
+    // "Zaklínač" and "Krakatit" have Slovak editions under the same title, which a combined
+    // Czech and Slovak search mixed in.
+    for (title, author) in [
+        ("Zaklínač", "Andrzej Sapkowski"),
+        ("Krakatit", "Karel Čapek"),
+        ("Saturnin", "Zdeněk Jirotka"),
+        ("Malý princ", "Antoine de Saint-Exupéry"),
+        ("Harry Potter a Kámen mudrců", "J. K. Rowling"),
+    ] {
+        let page = site
+            .page(&build_search_url(title, Lang::Czech))
+            .await
+            .unwrap();
+        let expected: Vec<String> = rank(search_results(&page.body), title, author)
+            .into_iter()
+            .take(3)
+            .map(|hit| hit.provider_id)
+            .collect();
+        let query = format!(
+            "/search?query={}&author={}&limit=3",
+            urlencode(title),
+            urlencode(author)
+        );
+        let body = get(&base, &query).await;
+        let answered: Vec<String> = matches(&body)
+            .iter()
+            .map(|b| b["providerId"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(answered, expected, "{title}");
+        for book in matches(&body) {
+            assert_ne!(
+                book["languageCode"], "sk",
+                "{title}: a Slovak edition: {book}"
+            );
+        }
+    }
+}
+
+fn urlencode(value: &str) -> String {
+    reqwest::Url::parse_with_params("http://x/", &[("v", value)])
+        .unwrap()
+        .query()
+        .unwrap_or_default()
+        .trim_start_matches("v=")
+        .to_string()
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_search_respects_the_limit() {
+    let base = provider().await;
+    for (limit, expected) in [("1", 1), ("3", 3), ("10", 5)] {
+        let body = get(
+            &base,
+            &format!("/search?query=Harry%20Potter&limit={limit}"),
+        )
+        .await;
+        assert_eq!(matches(&body).len(), expected, "limit {limit}: {body}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_lookup_by_a_full_address() {
+    let base = provider().await;
+    let book = get(
+        &base,
+        "/book/https%3A%2F%2Fwww.databazeknih.cz%2Fprehled-knihy%2Fkrakatit-688",
+    )
+    .await;
+    assert_eq!(book["providerId"], "krakatit-688");
+    assert_eq!(book["title"], "Krakatit");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
 async fn live_unknown_id_is_not_found() {
     let base = provider().await;
     let res = reqwest::get(format!("{base}/book/999999999"))

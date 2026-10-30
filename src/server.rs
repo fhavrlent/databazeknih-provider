@@ -14,11 +14,11 @@ use tokio::task::JoinSet;
 
 use crate::databazeknih::{
     build_book_url, build_more_info_url, build_search_url, extract_id, extract_path, is_book_page,
-    is_unknown_book_redirect, path_of, Client, Page, UpstreamError,
+    is_unknown_book_redirect, path_of, Client, Lang, Page, UpstreamError,
 };
 use crate::mapping::{
-    map_book, parse_book_page, parse_more_info, rank, same_isbn, says_nothing_found,
-    search_results, BookMetadata, MoreInfo,
+    closeness, map_book, parse_book_page, parse_more_info, rank, same_isbn, says_nothing_found,
+    search_results, BookMetadata, Closeness, MoreInfo, SearchHit,
 };
 use crate::{Config, VERSION};
 
@@ -133,7 +133,8 @@ async fn search_books(
     // The ISBN first: when the site knows it, its search answers with the book's own page, the
     // edition itself and not a title that merely matches.
     if let Some(isbn) = isbn {
-        let page = search_page(state, isbn, deadline).await?;
+        // The site's ISBN search ignores the language.
+        let page = search_page(state, isbn, Lang::Czech, deadline).await?;
         if is_book_page(&page.url) {
             let answer = landed_on_book(state, page, Some(isbn), deadline).await?;
             // The site's ISBN search is not exact: an unknown ISBN can land on a book whose
@@ -155,23 +156,17 @@ async fn search_books(
         }
     }
 
-    let page = search_page(state, phrase, deadline).await?;
-    // A title that is also the whole name of one book can land on it straight away too.
-    if is_book_page(&page.url) {
-        return landed_on_book(state, page, None, deadline).await;
-    }
-    let mut hits = rank(search_results(&page.body), phrase, author);
-    if hits.is_empty() {
-        // BookOrbit remembers an empty answer, so it is given only when the site says so.
-        return if says_nothing_found(&page.body) {
-            Ok(SearchResponse {
+    let mut hits = match title_search(state, phrase, author, deadline).await? {
+        TitleSearch::Landed(page) => return landed_on_book(state, page, None, deadline).await,
+        TitleSearch::Hits(hits) => hits,
+        // BookOrbit remembers an empty answer; both searches said they found nothing.
+        TitleSearch::Nothing => {
+            return Ok(SearchResponse {
                 matches: vec![],
                 partial: false,
             })
-        } else {
-            Err(not_understood(&page))
-        };
-    }
+        }
+    };
     hits.truncate(limit);
 
     let mut tasks = JoinSet::new();
@@ -218,6 +213,72 @@ async fn search_books(
     Ok(SearchResponse { matches, partial })
 }
 
+enum TitleSearch {
+    /// The search went straight to one book's page.
+    Landed(Page),
+    Hits(Vec<SearchHit>),
+    /// The site said it found nothing.
+    Nothing,
+}
+
+/// The results for a title, best first. Czech books, exactly as the site's default search lists
+/// them, unless they hold no book with the title asked for and the Slovak books match more
+/// closely: "Posledné želanie" finds Sapkowski's Czech "Poslední přání" among Czech books, but
+/// itself only among Slovak ones. A combined search would instead let a Slovak edition with the
+/// same title, such as Čapek's "Krakatit", tie with the Czech one.
+async fn title_search(
+    state: &AppState,
+    phrase: &str,
+    author: &str,
+    deadline: tokio::time::Instant,
+) -> Result<TitleSearch, UpstreamError> {
+    let czech = match language_search(state, phrase, Lang::Czech, deadline).await? {
+        Ok(hits) => hits,
+        Err(landed) => return Ok(TitleSearch::Landed(landed)),
+    };
+    let czech_closeness = closeness(&czech, phrase, author);
+    let chosen = if czech_closeness == Closeness::Title {
+        czech
+    } else {
+        let slovak = match language_search(state, phrase, Lang::Slovak, deadline).await? {
+            Ok(hits) => hits,
+            Err(landed) => return Ok(TitleSearch::Landed(landed)),
+        };
+        if closeness(&slovak, phrase, author) > czech_closeness
+            || (czech.is_empty() && !slovak.is_empty())
+        {
+            slovak
+        } else {
+            czech
+        }
+    };
+    Ok(if chosen.is_empty() {
+        TitleSearch::Nothing
+    } else {
+        TitleSearch::Hits(rank(chosen, phrase, author))
+    })
+}
+
+/// One language's results, or the page a search went straight to (`Err`). A page that lists no
+/// books must say it found none; otherwise it is not understood.
+async fn language_search(
+    state: &AppState,
+    phrase: &str,
+    lang: Lang,
+    deadline: tokio::time::Instant,
+) -> Result<Result<Vec<SearchHit>, Page>, UpstreamError> {
+    let page = search_page(state, phrase, lang, deadline).await?;
+    // A title that is the whole name of one book can land on it straight away.
+    if is_book_page(&page.url) {
+        return Ok(Err(page));
+    }
+    let hits = search_results(&page.body);
+    if hits.is_empty() && !says_nothing_found(&page.body) {
+        return Err(not_understood(&page));
+    }
+    Ok(Ok(hits))
+}
+
 /// The answer when a search lands straight on a book's page, within the search's deadline.
 async fn landed_on_book(
     state: &AppState,
@@ -255,9 +316,10 @@ fn not_understood(page: &Page) -> UpstreamError {
 async fn search_page(
     state: &AppState,
     phrase: &str,
+    lang: Lang,
     deadline: tokio::time::Instant,
 ) -> Result<Page, UpstreamError> {
-    tokio::time::timeout_at(deadline, state.dk.page(&build_search_url(phrase)))
+    tokio::time::timeout_at(deadline, state.dk.page(&build_search_url(phrase, lang)))
         .await
         .unwrap_or_else(|_| Err(UpstreamError::Failed("search page timed out".into())))
         .map_err(|err| match err {
@@ -672,8 +734,115 @@ mod tests {
         // The author is not sent: the site matches titles, and an author in the phrase finds less.
         assert_eq!(
             fake.requests()[0],
-            "/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D&lang=czsk"
+            "/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D&lang=cz"
         );
+    }
+
+    const SEARCH_SLOVAK: &str = r#"
+      <p class='new'>
+        <a class='new' type='book' href='/prehled-knihy/posledne-zelanie-269265'>Posledné želanie</a>
+        <br /><span class='pozn'>2015, Andrzej Sapkowski</span>
+      </p>
+    "#;
+
+    const SEARCH_UNRELATED: &str = r#"
+      <p class='new'>
+        <a class='new' type='book' href='/prehled-knihy/posledne-zbohom-75605'>Posledné zbohom</a>
+        <br /><span class='pozn'>2004, Jana Nováková</span>
+      </p>
+    "#;
+
+    fn slovak_site(czech: &str) -> Arc<Fake> {
+        let fake = sapkowski_site();
+        for (query, body) in [
+            (
+                "/vyhledavani/knihy?q=Posledn%C3%A9+%C5%BEelanie&lang=cz",
+                czech,
+            ),
+            (
+                "/vyhledavani/knihy?q=Posledn%C3%A9+%C5%BEelanie&lang=sk",
+                SEARCH_SLOVAK,
+            ),
+        ] {
+            fake.pages
+                .lock()
+                .unwrap()
+                .insert(query.into(), (200, body.into()));
+        }
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/posledne-zelanie-269265".into(),
+            (
+                200,
+                r#"<div id="bookDetail"><h1 class="oddown_zero">Posledné želanie</h1></div>
+                <script type="application/ld+json">{ "@type": "Book", "inLanguage": "sk",
+                "url": "https://www.databazeknih.cz/prehled-knihy/posledne-zelanie-269265" }</script>"#
+                    .into(),
+            ),
+        );
+        fake
+    }
+
+    #[tokio::test]
+    async fn a_czech_close_match_never_asks_for_slovak_books() {
+        let fake = sapkowski_site();
+        let base = provider(fake.clone()).await;
+        get(
+            &base,
+            "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski",
+            None,
+        )
+        .await;
+        assert!(
+            !fake.requests().iter().any(|r| r.contains("lang=sk")),
+            "{:?}",
+            fake.requests()
+        );
+    }
+
+    #[tokio::test]
+    async fn slovak_books_are_searched_when_no_czech_result_is_close() {
+        // The Czech results may even hold the author's book under its Czech title.
+        let czech_by_author = r#"<p class='new'>
+            <a class='new' type='book' href='/prehled-knihy/zaklinac-posledni-prani-30396'>Poslední přání</a>
+            <br /><span class='pozn'>1999, Andrzej Sapkowski</span></p>"#;
+        for czech in [SEARCH_UNRELATED, NOTHING_FOUND, czech_by_author] {
+            let fake = slovak_site(czech);
+            let base = provider(fake.clone()).await;
+            let (status, body, _) = get(
+                &base,
+                "/search?query=Posledn%C3%A9%20%C5%BEelanie&author=Andrzej%20Sapkowski",
+                None,
+            )
+            .await;
+            assert_eq!(status, 200);
+            assert_eq!(matches(&body)[0]["title"], "Posledné želanie", "{body}");
+            assert_eq!(matches(&body)[0]["languageCode"], "sk");
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_close_match_in_either_language_the_czech_results_stand() {
+        let fake = slovak_site(SEARCH_UNRELATED);
+        fake.pages.lock().unwrap().insert(
+            "/vyhledavani/knihy?q=Posledn%C3%A9+%C5%BEelanie&lang=sk".into(),
+            (200, NOTHING_FOUND.into()),
+        );
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/posledne-zbohom-75605".into(),
+            (
+                200,
+                r#"<div id="bookDetail"><h1 class="oddown_zero">Posledné zbohom</h1></div>"#.into(),
+            ),
+        );
+        let base = provider(fake).await;
+        let (status, body, _) = get(
+            &base,
+            "/search?query=Posledn%C3%A9%20%C5%BEelanie&author=Someone%20Else",
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(matches(&body)[0]["title"], "Posledné zbohom", "{body}");
     }
 
     #[tokio::test]
@@ -690,7 +859,7 @@ mod tests {
     async fn search_by_isbn_lands_on_the_book() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=8085951142&lang=czsk".into(),
+            "/vyhledavani/knihy?q=8085951142&lang=cz".into(),
             (
                 302,
                 "redirect:/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396".into(),
@@ -717,7 +886,7 @@ mod tests {
         assert_eq!(
             fake.requests(),
             [
-                "/vyhledavani/knihy?q=8085951142&lang=czsk",
+                "/vyhledavani/knihy?q=8085951142&lang=cz",
                 "/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396",
                 "/book-detail-more-info/30396",
             ]
@@ -728,7 +897,7 @@ mod tests {
     async fn an_unknown_isbn_falls_back_to_the_title_or_answers_none() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=9780000000002&lang=czsk".into(),
+            "/vyhledavani/knihy?q=9780000000002&lang=cz".into(),
             (200, NOTHING_FOUND.into()),
         );
         let base = provider(fake.clone()).await;
@@ -747,7 +916,12 @@ mod tests {
     async fn search_respects_the_limit() {
         let fake = sapkowski_site();
         let base = provider(fake.clone()).await;
-        let (_, body, _) = get(&base, "/search?query=x&author=Sapkowski&limit=1", None).await;
+        let (_, body, _) = get(
+            &base,
+            "/search?query=Zakl%C3%ADna%C4%8D&author=Sapkowski&limit=1",
+            None,
+        )
+        .await;
         assert_eq!(matches(&body).len(), 1);
         assert_eq!(matches(&body)[0]["title"], "Poslední přání");
         assert_eq!(fake.requests().len(), 3);
@@ -840,7 +1014,7 @@ mod tests {
     async fn a_search_that_lands_on_a_book_keeps_the_deadline() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=czsk".into(),
+            "/vyhledavani/knihy?q=Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=cz".into(),
             (
                 302,
                 "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
@@ -871,7 +1045,7 @@ mod tests {
         // Seen on databazeknih.cz: 9780000000002 lands on a book recorded with ISBN 000-000-000.
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=9780000000002&lang=czsk".into(),
+            "/vyhledavani/knihy?q=9780000000002&lang=cz".into(),
             (
                 302,
                 "redirect:/prehled-knihy/pred-ocima-vesnice-370474".into(),
@@ -909,7 +1083,7 @@ mod tests {
     async fn an_isbn_13_search_matches_an_edition_that_lists_its_isbn_10() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=9788085951141&lang=czsk".into(),
+            "/vyhledavani/knihy?q=9788085951141&lang=cz".into(),
             (
                 302,
                 "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
@@ -941,7 +1115,7 @@ mod tests {
         ]);
         for isbn in ["9788073353230", "9788073355203", "9788087440582"] {
             fake.pages.lock().unwrap().insert(
-                format!("/vyhledavani/knihy?q={isbn}&lang=czsk"),
+                format!("/vyhledavani/knihy?q={isbn}&lang=cz"),
                 (302, "redirect:/prehled-knihy/emma-470637".into()),
             );
         }

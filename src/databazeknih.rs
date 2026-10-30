@@ -182,13 +182,24 @@ static BOOK_LINK: LazyLock<Regex> = LazyLock::new(|| {
 static BARE_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^((?:[a-z0-9]+-)*([0-9]+))$").expect("valid pattern"));
 
-/// The search page for a phrase, among Czech and Slovak books. Without `lang` the site misses
-/// Slovak titles such as "Posledné želanie"; Czech results come back the same either way.
-pub fn build_search_url(phrase: &str) -> String {
+/// Which books the site's search looks among. `Czech` is its default; `Slovak` finds Slovak titles
+/// such as "Posledné želanie" that the default does not. An ISBN search ignores it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lang {
+    Czech,
+    Slovak,
+}
+
+/// The search page for a phrase among the books of one language.
+pub fn build_search_url(phrase: &str, lang: Lang) -> String {
     let mut url = Url::parse(&format!("{SITE}{SEARCH_PATH}")).expect("valid search URL");
-    url.query_pairs_mut()
-        .append_pair("q", phrase)
-        .append_pair("lang", "czsk");
+    url.query_pairs_mut().append_pair("q", phrase).append_pair(
+        "lang",
+        match lang {
+            Lang::Czech => "cz",
+            Lang::Slovak => "sk",
+        },
+    );
     url.to_string()
 }
 
@@ -275,9 +286,10 @@ mod tests {
     #[test]
     fn search_url_encodes_the_phrase() {
         assert_eq!(
-            build_search_url("Zaklínač: Poslední přání"),
-            "https://www.databazeknih.cz/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D%3A+Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=czsk"
+            build_search_url("Zaklínač: Poslední přání", Lang::Czech),
+            "https://www.databazeknih.cz/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D%3A+Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=cz"
         );
+        assert!(build_search_url("Krakatit", Lang::Slovak).ends_with("?q=Krakatit&lang=sk"));
     }
 
     #[test]

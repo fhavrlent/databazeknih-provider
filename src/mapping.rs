@@ -217,29 +217,68 @@ fn caption_authors(link: ElementRef) -> Vec<String> {
 /// The site's search matches titles only, so "Zaklínač" by Sapkowski can trail a pulp novel that
 /// shares the word.
 pub fn rank(hits: Vec<SearchHit>, title: &str, author: &str) -> Vec<SearchHit> {
-    let wanted_title = fold(title);
-    let wanted_author: HashSet<String> = fold(author)
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.chars().count() > 1)
-        .map(str::to_string)
-        .collect();
+    let wanted = Wanted::new(title, author);
     let mut scored: Vec<(u8, usize, SearchHit)> = hits
         .into_iter()
         .enumerate()
-        .map(|(index, hit)| {
-            let by_author = !wanted_author.is_empty()
-                && hit.authors.iter().any(|name| {
-                    fold(name)
-                        .split(|c: char| !c.is_alphanumeric())
-                        .rfind(|word| !word.is_empty())
-                        .is_some_and(|surname| wanted_author.contains(surname))
-                });
-            let same_title = fold(&hit.title) == wanted_title;
-            (u8::from(by_author) * 2 + u8::from(same_title), index, hit)
-        })
+        .map(|(index, hit)| (wanted.score(&hit), index, hit))
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     scored.into_iter().map(|(_, _, hit)| hit).collect()
+}
+
+/// How closely the best of a search's results matches what was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Closeness {
+    /// Only books that share a word with the title.
+    None,
+    /// A book by the author asked for, under another title.
+    Author,
+    /// A book with exactly the title asked for.
+    Title,
+}
+
+pub fn closeness(hits: &[SearchHit], title: &str, author: &str) -> Closeness {
+    let wanted = Wanted::new(title, author);
+    hits.iter()
+        .map(|hit| match wanted.score(hit) {
+            0 => Closeness::None,
+            2 => Closeness::Author,
+            _ => Closeness::Title,
+        })
+        .max()
+        .unwrap_or(Closeness::None)
+}
+
+struct Wanted {
+    title: String,
+    author: HashSet<String>,
+}
+
+impl Wanted {
+    fn new(title: &str, author: &str) -> Self {
+        Self {
+            title: fold(title),
+            author: fold(author)
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|word| word.chars().count() > 1)
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    /// 2 for the author asked for, by surname, plus 1 for exactly the title asked for.
+    fn score(&self, hit: &SearchHit) -> u8 {
+        let by_author = !self.author.is_empty()
+            && hit.authors.iter().any(|name| {
+                fold(name)
+                    .split(|c: char| !c.is_alphanumeric())
+                    .rfind(|word| !word.is_empty())
+                    .is_some_and(|surname| self.author.contains(surname))
+            });
+        let same_title = fold(&hit.title) == self.title;
+        u8::from(by_author) * 2 + u8::from(same_title)
+    }
 }
 
 pub fn parse_book_page(html: &str, source_url: Option<&str>) -> BookPage {

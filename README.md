@@ -45,7 +45,7 @@ and failures, never titles.
 
 | Route | |
 |---|---|
-| `GET /provider/info` | Key `databazeknih`, books, audiobooks and comics, lookup, ISBN search, one call at a time 500 ms apart, a URL template for book links, icon and colour. No cover shape: print covers are portrait, audiobook covers square |
+| `GET /provider/info` | Key `databazeknih`, books, audiobooks and comics, lookup, ISBN search, one call at a time 500 ms apart, a URL template for book links, icon and colour. No cover shape: print covers are portrait, audiobook covers square or nearly (27 of 31 measured square, 4 slightly wider, none portrait), and BookOrbit ranks a declared shape that does not fit last |
 | `GET /search?query=&author=&isbn=&mediaType=&limit=` | `limit` defaults to 5, at most 5 |
 | `GET /book/{id}` | An id such as `zaklinac-posledni-prani-272481`, or the bare number `272481`, or a databazeknih.cz book address. The answer carries the id that was asked for, even when the site has renamed the book's slug |
 
@@ -78,8 +78,12 @@ is a `502`.
   finds fewer of the right books. Results stay in the site's order, except that books by the
   author BookOrbit asked for (by surname, ignoring diacritics and name order) come first, and among
   them an exact title before a partial one. "Zaklínač" by Sapkowski otherwise trails a pulp novel
-  of the same name. It searches Czech and Slovak books: the site's default misses Slovak titles
-  such as "Posledné želanie", and Czech results are the same either way.
+  of the same name. It searches Czech books first, exactly as the site's default search does,
+  and keeps those results whenever one has the title asked for. Only otherwise does it also
+  search Slovak books, and it uses them when they match more closely: "Posledné želanie" is found
+  only among Slovak books, while among Czech ones it brings up Sapkowski's Czech "Poslední přání".
+  Czech and Slovak are never searched together, because a Slovak edition under the same title,
+  such as Čapek's "Krakatit", would then tie with the Czech one.
 - **Ids** are the slug and number of the book's address, such as `zaklinac-posledni-prani-272481`,
   taken from the page's canonical address. Every edition, including audiobooks, has its own.
   Lookups use the number; the site redirects any slug to the current one, and the answer keeps
@@ -127,9 +131,15 @@ are cut down to the parts the provider reads, plus the site's summary of reader 
 the description, which the tests check stays out of it.
 
 Those fixtures do not change when databazeknih.cz does, so live tests check the real site too:
-well-known books keep their title, author, series, pages, ISBN, cover, narrators and running time,
-an ISBN search lands on its edition, and an unknown id is not found. `cargo test` skips them; run
-them with:
+well-known books keep their title, author, series, pages, ISBN, cover, narrators and running time;
+ISBN searches (real, made up, placeholders, several per edition) answer only editions that list
+the ISBN; Czech searches answer the site's own Czech results; Slovak titles are found; limits
+hold; unknown ids are not found.
+
+The real site cannot be made to fail, so fault tests put a small proxy in front of it: every page
+is the site's own, fetched live, and only the failure under test is injected, such as a
+redesigned results page, a reworded "nothing found", a slow or failing book page, a maintenance
+redirect, a `429` or an unreachable site. `cargo test` skips both; run them with:
 
 ```bash
 cargo test live -- --ignored --test-threads=1
