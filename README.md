@@ -16,7 +16,7 @@ Beside BookOrbit, on the same Docker network:
 ```yaml
 services:
   databazeknih:
-    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.0
+    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.1
     restart: unless-stopped
 ```
 
@@ -30,7 +30,7 @@ has the steps. No account or key is needed. To build it yourself:
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | unset | When set, `/search` and `/book/{id}` require this exact `Authorization` header |
 | `DATABAZEKNIH_SITE` | `https://www.databazeknih.cz` | Where pages are fetched from; links in answers always point at databazeknih.cz |
-| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.0` | |
+| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.1` | |
 | `DEADLINE_MS` | `8000` | How long a search or lookup may take. A search that runs out answers with the books it has, marked partial. Raise it if you raise the provider's timeout in BookOrbit (10 seconds by default) |
 
 databazeknih.cz is a community site, so the provider sends it at most two requests at a time, at
@@ -45,9 +45,9 @@ and failures, never titles.
 
 | Route | |
 |---|---|
-| `GET /provider/info` | Key `databazeknih`, books, audiobooks and comics, lookup, ISBN search, one call at a time 500 ms apart, a URL template for book links, portrait covers, icon and colour |
+| `GET /provider/info` | Key `databazeknih`, books, audiobooks and comics, lookup, ISBN search, one call at a time 500 ms apart, a URL template for book links, icon and colour. No cover shape: print covers are portrait, audiobook covers square |
 | `GET /search?query=&author=&isbn=&mediaType=&limit=` | `limit` defaults to 5, at most 5 |
-| `GET /book/{id}` | An id such as `zaklinac-posledni-prani-272481`, or the bare number `272481`, or a databazeknih.cz book address |
+| `GET /book/{id}` | An id such as `zaklinac-posledni-prani-272481`, or the bare number `272481`, or a databazeknih.cz book address. The answer carries the id that was asked for, even when the site has renamed the book's slug |
 
 A book costs two requests: its overview page and the "Více info..." fragment that holds its page
 count, ISBN, form, narrators and running time. A title search is the search page and then each
@@ -58,19 +58,28 @@ Status codes: `400` neither a query nor a valid ISBN, `401` bad token, `404` unk
 where some book pages could not be fetched or read still answers `200` with `"partial": true`; one
 where none could answers `502`, never an empty list.
 
+BookOrbit remembers an empty search and a `404`, so the provider gives them only when the site says
+so. A search answers empty only when its page says "jsme bohužel nenašli žádný výsledek"; a results
+page it cannot read is a `502`. A lookup answers `404` only when the site redirects the book to its
+catalogue (`/knihy`), which it does for unknown books; any other page, such as a maintenance page,
+is a `502`.
+
 ## Mapping
 
 - **ISBN search** comes first when BookOrbit sends an ISBN. The site's search sends an ISBN it
-  knows straight to that edition's page, which is the answer. When it does not know it, the title
-  is searched instead, or, without a title, the answer is empty.
+  knows straight to that edition's page, which is the answer. When the edition lists more than
+  one ISBN, the one searched is reported. When the site does not know it, the title is searched
+  instead, or, without a title, the answer is empty.
 - **Title search** asks for the title alone: the site matches titles, and an author in the phrase
   finds fewer of the right books. Results stay in the site's order, except that books by the
   author BookOrbit asked for (by surname, ignoring diacritics and name order) come first, and among
   them an exact title before a partial one. "Zaklínač" by Sapkowski otherwise trails a pulp novel
-  of the same name. The site searches Czech-language books by default.
+  of the same name. It searches Czech and Slovak books: the site's default misses Slovak titles
+  such as "Posledné želanie", and Czech results are the same either way.
 - **Ids** are the slug and number of the book's address, such as `zaklinac-posledni-prani-272481`,
   taken from the page's canonical address. Every edition, including audiobooks, has its own.
-  Lookups use the number; the site redirects any slug to the current one.
+  Lookups use the number; the site redirects any slug to the current one, and the answer keeps
+  the id that was asked for.
 - **Title, authors, series and genres** are in Czech as the site has them. The series box ("Zaklínač
   série, 1. díl") gives the series and its position.
 - **Media type** is `audiobook` when the edition's form is "audiokniha", `comic` when a genre is

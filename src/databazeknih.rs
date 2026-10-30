@@ -12,6 +12,7 @@ pub const SITE: &str = "https://www.databazeknih.cz";
 const SEARCH_PATH: &str = "/vyhledavani/knihy";
 const BOOK_PATH_PREFIX: &str = "/prehled-knihy/";
 const MORE_INFO_PATH: &str = "/book-detail-more-info/";
+const UNKNOWN_BOOK_PATH: &str = "/knihy";
 const MAX_BODY_BYTES: usize = 4 << 20;
 const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
@@ -181,10 +182,13 @@ static BOOK_LINK: LazyLock<Regex> = LazyLock::new(|| {
 static BARE_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^((?:[a-z0-9]+-)*([0-9]+))$").expect("valid pattern"));
 
-/// The search page for a phrase. The site searches Czech-language books unless told otherwise.
+/// The search page for a phrase, among Czech and Slovak books. Without `lang` the site misses
+/// Slovak titles such as "Posledné želanie"; Czech results come back the same either way.
 pub fn build_search_url(phrase: &str) -> String {
     let mut url = Url::parse(&format!("{SITE}{SEARCH_PATH}")).expect("valid search URL");
-    url.query_pairs_mut().append_pair("q", phrase);
+    url.query_pairs_mut()
+        .append_pair("q", phrase)
+        .append_pair("lang", "czsk");
     url.to_string()
 }
 
@@ -237,6 +241,22 @@ pub fn is_book_page(url: &str) -> bool {
     })
 }
 
+/// Whether an address is the catalogue the site redirects an unknown book to. Only that redirect
+/// means the book is gone; any other page instead of a book, a maintenance page or a new
+/// address scheme, is a failure, since BookOrbit remembers a 404.
+pub fn is_unknown_book_redirect(url: &str) -> bool {
+    Url::parse(url)
+        .ok()
+        .is_some_and(|url| url.path().trim_end_matches('/') == UNKNOWN_BOOK_PATH)
+}
+
+/// The path of a page, without the query that may carry a searched title, for logs.
+pub fn path_of(url: &str) -> String {
+    Url::parse(url)
+        .map(|url| url.path().to_string())
+        .unwrap_or_default()
+}
+
 pub fn resolve_url(value: &str) -> Option<String> {
     if let Some(rest) = value.strip_prefix("//") {
         return Some(format!("https://{rest}"));
@@ -256,7 +276,7 @@ mod tests {
     fn search_url_encodes_the_phrase() {
         assert_eq!(
             build_search_url("Zaklínač: Poslední přání"),
-            "https://www.databazeknih.cz/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D%3A+Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD"
+            "https://www.databazeknih.cz/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D%3A+Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=czsk"
         );
     }
 
@@ -317,6 +337,28 @@ mod tests {
             "https://www.databazeknih.cz/vyhledavani/knihy?q=9788074770791"
         ));
         assert!(!is_book_page("https://www.databazeknih.cz/"));
+    }
+
+    #[test]
+    fn only_the_catalogue_means_an_unknown_book() {
+        assert!(is_unknown_book_redirect(
+            "https://www.databazeknih.cz/knihy"
+        ));
+        assert!(is_unknown_book_redirect(
+            "https://www.databazeknih.cz/knihy/"
+        ));
+        for other in [
+            "https://www.databazeknih.cz/",
+            "https://www.databazeknih.cz/udrzba",
+            "https://www.databazeknih.cz/knihy/zaklinac-posledni-prani-272481",
+            "https://www.databazeknih.cz/prehled-knihy/posledni-prani-497285",
+        ] {
+            assert!(!is_unknown_book_redirect(other), "{other}");
+        }
+        assert_eq!(
+            path_of("https://www.databazeknih.cz/vyhledavani/knihy?q=Krakatit"),
+            "/vyhledavani/knihy"
+        );
     }
 
     #[test]

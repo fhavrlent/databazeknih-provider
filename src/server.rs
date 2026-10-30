@@ -13,11 +13,12 @@ use serde_json::json;
 use tokio::task::JoinSet;
 
 use crate::databazeknih::{
-    build_book_url, build_more_info_url, build_search_url, extract_id, is_book_page, Client, Page,
-    UpstreamError,
+    build_book_url, build_more_info_url, build_search_url, extract_id, extract_path, is_book_page,
+    is_unknown_book_redirect, path_of, Client, Page, UpstreamError,
 };
 use crate::mapping::{
-    map_book, parse_book_page, parse_more_info, rank, search_results, BookMetadata, MoreInfo,
+    map_book, parse_book_page, parse_more_info, rank, says_nothing_found, search_results,
+    BookMetadata, MoreInfo,
 };
 use crate::{Config, VERSION};
 
@@ -68,7 +69,8 @@ async fn info(State(state): State<AppState>) -> Response {
         "searchParams": ["isbn", "limit"],
         "idMaxLength": MAX_ID_LENGTH,
         "bookUrlTemplate": "https://www.databazeknih.cz/prehled-knihy/{id}",
-        "coverShape": "portrait",
+        // No `coverShape`: print covers are portrait and audiobook covers square, and BookOrbit
+        // drops covers that do not fit a declared shape.
         // The link colour of databazeknih.cz's stylesheet (`--link`).
         "color": "#a03a3b",
         // A search already keeps both upstream slots busy, so BookOrbit sends one call at a time
@@ -123,19 +125,12 @@ async fn search_books(
     if let Some(isbn) = isbn {
         let page = search_page(state, isbn, deadline).await?;
         if is_book_page(&page.url) {
-            let book = tokio::time::timeout_at(deadline, read_book(&state.dk, page, ""))
-                .await
-                .unwrap_or_else(|_| Err(UpstreamError::Failed("book details timed out".into())));
-            return match book {
-                Ok(Some(book)) => Ok(SearchResponse {
-                    matches: vec![book],
-                    partial: false,
-                }),
-                Ok(None) | Err(UpstreamError::NotFound) => Err(UpstreamError::Failed(
-                    "the ISBN's book page could not be read".into(),
-                )),
-                Err(err) => Err(err),
-            };
+            return landed_on_book(state, page, Some(isbn), deadline).await;
+        }
+        // Results for an ISBN that did not land on a book share its digits by chance, so only
+        // a page that says it found nothing, or that lists books, is understood.
+        if !says_nothing_found(&page.body) && search_results(&page.body).is_empty() {
+            return Err(not_understood(&page));
         }
         if phrase.is_empty() {
             return Ok(SearchResponse {
@@ -148,13 +143,20 @@ async fn search_books(
     let page = search_page(state, phrase, deadline).await?;
     // A title that is also the whole name of one book can land on it straight away too.
     if is_book_page(&page.url) {
-        let book = read_book(&state.dk, page, "").await?;
-        return Ok(SearchResponse {
-            matches: book.into_iter().collect(),
-            partial: false,
-        });
+        return landed_on_book(state, page, None, deadline).await;
     }
     let mut hits = rank(search_results(&page.body), phrase, author);
+    if hits.is_empty() {
+        // BookOrbit remembers an empty answer, so it is given only when the site says so.
+        return if says_nothing_found(&page.body) {
+            Ok(SearchResponse {
+                matches: vec![],
+                partial: false,
+            })
+        } else {
+            Err(not_understood(&page))
+        };
+    }
     hits.truncate(limit);
 
     let mut tasks = JoinSet::new();
@@ -201,6 +203,36 @@ async fn search_books(
     Ok(SearchResponse { matches, partial })
 }
 
+/// The answer when a search lands straight on a book's page, within the search's deadline.
+async fn landed_on_book(
+    state: &AppState,
+    page: Page,
+    isbn: Option<&str>,
+    deadline: tokio::time::Instant,
+) -> Result<SearchResponse, UpstreamError> {
+    let book = tokio::time::timeout_at(deadline, read_book(&state.dk, page, "", isbn))
+        .await
+        .unwrap_or_else(|_| Err(UpstreamError::Failed("book details timed out".into())));
+    match book {
+        Ok(Some(book)) => Ok(SearchResponse {
+            matches: vec![book],
+            partial: false,
+        }),
+        // The search led to this book, so a page that does not read is a failure, not an absence.
+        Ok(None) | Err(UpstreamError::NotFound) => Err(UpstreamError::Failed(
+            "the book page a search led to could not be read".into(),
+        )),
+        Err(err) => Err(err),
+    }
+}
+
+fn not_understood(page: &Page) -> UpstreamError {
+    UpstreamError::Failed(format!(
+        "search page at {} lists no books and does not say it found none",
+        path_of(&page.url)
+    ))
+}
+
 async fn search_page(
     state: &AppState,
     phrase: &str,
@@ -222,17 +254,26 @@ async fn fetch_book(
     provider_id: &str,
 ) -> Result<Option<BookMetadata>, UpstreamError> {
     let page = dk.page(url).await?;
-    read_book(dk, page, provider_id).await
+    read_book(dk, page, provider_id, None).await
 }
 
 async fn read_book(
     dk: &Client,
     page: Page,
     provider_id: &str,
+    searched_isbn: Option<&str>,
 ) -> Result<Option<BookMetadata>, UpstreamError> {
-    // The site sends an unknown book to its catalogue rather than answering 404.
     if !is_book_page(&page.url) {
-        return Err(UpstreamError::NotFound);
+        // The site sends an unknown book to its catalogue rather than answering 404. Any other
+        // page, a maintenance page or a new address scheme, says nothing about the book.
+        return Err(if is_unknown_book_redirect(&page.url) {
+            UpstreamError::NotFound
+        } else {
+            UpstreamError::Failed(format!(
+                "a book address led to {} instead of a book page",
+                path_of(&page.url)
+            ))
+        });
     }
     let parsed = parse_book_page(&page.body, Some(&page.url));
     let Some(id) = extract_id(&parsed.provider_id).or_else(|| extract_id(&page.url)) else {
@@ -243,7 +284,13 @@ async fn read_book(
         Err(UpstreamError::NotFound) => MoreInfo::default(),
         Err(err) => return Err(err),
     };
-    Ok(map_book(&parsed, &more, &page.url, provider_id))
+    Ok(map_book(
+        &parsed,
+        &more,
+        &page.url,
+        provider_id,
+        searched_isbn,
+    ))
 }
 
 async fn lookup(
@@ -254,8 +301,8 @@ async fn lookup(
     if let Some(denied) = deny_unauthorized(&state, &headers) {
         return denied;
     }
-    let url = match build_book_url(&raw) {
-        Some(url) if raw.len() <= MAX_ID_LENGTH => url,
+    let (url, requested) = match (build_book_url(&raw), extract_path(&raw)) {
+        (Some(url), Some(requested)) if raw.len() <= MAX_ID_LENGTH => (url, requested),
         _ => return error(StatusCode::NOT_FOUND, "Not found"),
     };
 
@@ -264,7 +311,12 @@ async fn lookup(
         .unwrap_or_else(|_| Err(UpstreamError::Failed("book page timed out".into())));
 
     match result {
-        Ok(Some(book)) => Json(book).into_response(),
+        // The id BookOrbit asked for, not the page's current slug: the site renames slugs when a
+        // title changes, and BookOrbit files the book under the id it stored.
+        Ok(Some(mut book)) => {
+            book.provider_id = requested;
+            Json(book).into_response()
+        }
         Ok(None) => {
             eprintln!("[provider.lookup] [fail] error=\"book page did not parse\" - databazeknih page unreadable");
             error(
@@ -399,6 +451,7 @@ mod tests {
     "#;
 
     const EMPTY_PAGE: &str = "<html><body></body></html>";
+    const NOTHING_FOUND: &str = include_str!("../testdata/search-nothing.html");
 
     /// One canned answer per path, a delay per path, and a log of every request it saw. A
     /// `redirect:` body answers with a redirect to the rest of it, as the site does.
@@ -554,6 +607,8 @@ mod tests {
         );
         assert_eq!(info["searchParams"], json!(["isbn", "limit"]));
         assert_eq!(info["color"], "#a03a3b");
+        // Print covers are portrait and audiobook covers square.
+        assert!(info.get("coverShape").is_none());
     }
 
     #[tokio::test]
@@ -587,7 +642,7 @@ mod tests {
         // The author is not sent: the site matches titles, and an author in the phrase finds less.
         assert_eq!(
             fake.requests()[0],
-            "/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D"
+            "/vyhledavani/knihy?q=Zakl%C3%ADna%C4%8D&lang=czsk"
         );
     }
 
@@ -605,7 +660,7 @@ mod tests {
     async fn search_by_isbn_lands_on_the_book() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=8085951142".into(),
+            "/vyhledavani/knihy?q=8085951142&lang=czsk".into(),
             (
                 302,
                 "redirect:/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396".into(),
@@ -632,7 +687,7 @@ mod tests {
         assert_eq!(
             fake.requests(),
             [
-                "/vyhledavani/knihy?q=8085951142",
+                "/vyhledavani/knihy?q=8085951142&lang=czsk",
                 "/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396",
                 "/book-detail-more-info/30396",
             ]
@@ -643,8 +698,8 @@ mod tests {
     async fn an_unknown_isbn_falls_back_to_the_title_or_answers_none() {
         let fake = sapkowski_site();
         fake.pages.lock().unwrap().insert(
-            "/vyhledavani/knihy?q=9780000000002".into(),
-            (200, EMPTY_PAGE.into()),
+            "/vyhledavani/knihy?q=9780000000002&lang=czsk".into(),
+            (200, NOTHING_FOUND.into()),
         );
         let base = provider(fake.clone()).await;
         let (status, body, _) = get(&base, "/search?isbn=9780000000002", None).await;
@@ -729,11 +784,80 @@ mod tests {
 
     #[tokio::test]
     async fn no_results_is_an_empty_answer() {
-        let fake = Fake::with(&[("/vyhledavani/knihy", 200, EMPTY_PAGE)]);
+        let fake = Fake::with(&[("/vyhledavani/knihy", 200, NOTHING_FOUND)]);
         let base = provider(fake).await;
         let (status, body, _) = get(&base, "/search?query=qxzwv", None).await;
         assert_eq!((status, matches(&body).len()), (200, 0));
         assert!(body.get("partial").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_search_page_that_is_not_understood_is_a_failure_not_an_empty_answer() {
+        // A redesigned results page lists nothing the parser knows and does not say it found none.
+        let fake = Fake::with(&[("/vyhledavani/knihy", 200, EMPTY_PAGE)]);
+        let base = provider(fake.clone()).await;
+        assert_eq!(get(&base, "/search?query=Krakatit", None).await.0, 502);
+        assert_eq!(get(&base, "/search?isbn=9788086201559", None).await.0, 502);
+        assert_eq!(
+            get(&base, "/search?isbn=9788086201559&query=Krakatit", None)
+                .await
+                .0,
+            502
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_that_lands_on_a_book_keeps_the_deadline() {
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/vyhledavani/knihy?q=Posledn%C3%AD+p%C5%99%C3%A1n%C3%AD&lang=czsk".into(),
+            (
+                302,
+                "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            ),
+        );
+        fake.delays.lock().unwrap().insert(
+            "/book-detail-more-info/30396".into(),
+            Duration::from_secs(3),
+        );
+        let base = provider_at(&fake_site(fake).await, None, Duration::from_millis(700)).await;
+        let started = Instant::now();
+        let (status, _, _) = get(
+            &base,
+            "/search?query=Posledn%C3%AD%20p%C5%99%C3%A1n%C3%AD",
+            None,
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(status, 502);
+    }
+
+    #[tokio::test]
+    async fn an_isbn_search_reports_the_searched_isbn_of_an_edition_with_two() {
+        let fake = sapkowski_site();
+        fake.pages.lock().unwrap().insert(
+            "/vyhledavani/knihy?q=8085951142&lang=czsk".into(),
+            (
+                302,
+                "redirect:/prehled-knihy/zaklinac-posledni-prani-30396".into(),
+            ),
+        );
+        fake.pages.lock().unwrap().insert(
+            "/book-detail-more-info/30396".into(),
+            (
+                200,
+                "<dt>ISBN</dt><dd>978-80-7477-079-1, 80-85951-14-2</dd>".into(),
+            ),
+        );
+        let base = provider(fake).await;
+        let (_, body, _) = get(&base, "/search?isbn=8085951142", None).await;
+        let book = &matches(&body)[0];
+        assert_eq!(book["isbn10"], "8085951142");
+        assert!(book.get("isbn13").is_none(), "{book}");
     }
 
     #[tokio::test]
@@ -776,19 +900,30 @@ mod tests {
             (200, BOOK_HTML.into()),
         );
         let base = provider(fake.clone()).await;
-        for id in [
-            "30396",
-            "zaklinac-zaklinac-posledni-prani-30396",
-            "https%3A%2F%2Fwww.databazeknih.cz%2Fprehled-knihy%2Fzaklinac-zaklinac-posledni-prani-30396",
+        fake.pages.lock().unwrap().insert(
+            "/prehled-knihy/stary-nazev-30396".into(),
+            (
+                302,
+                "redirect:/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396".into(),
+            ),
+        );
+        // Each answer carries the id that was asked for, whatever the page's current slug.
+        for (id, answered) in [
+            ("30396", "30396"),
+            (
+                "zaklinac-zaklinac-posledni-prani-30396",
+                "zaklinac-zaklinac-posledni-prani-30396",
+            ),
+            ("stary-nazev-30396", "stary-nazev-30396"),
+            (
+                "https%3A%2F%2Fwww.databazeknih.cz%2Fprehled-knihy%2Fzaklinac-zaklinac-posledni-prani-30396",
+                "zaklinac-zaklinac-posledni-prani-30396",
+            ),
         ] {
             let (status, book, _) = get(&base, &format!("/book/{id}"), None).await;
             assert_eq!(
                 (status, book["providerId"].as_str(), book["title"].as_str()),
-                (
-                    200,
-                    Some("zaklinac-zaklinac-posledni-prani-30396"),
-                    Some("Poslední přání")
-                ),
+                (200, Some(answered), Some("Poslední přání")),
                 "{id}"
             );
         }
@@ -816,6 +951,17 @@ mod tests {
             );
         }
         assert_eq!(fake.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_lands_anywhere_but_the_catalogue_is_a_failure() {
+        // A maintenance page or a new address scheme says nothing about the book.
+        let fake = Fake::with(&[
+            ("/prehled-knihy/kniha-30396", 302, "redirect:/"),
+            ("/", 200, "<h1>Údržba</h1>"),
+        ]);
+        let base = provider(fake).await;
+        assert_eq!(get(&base, "/book/30396", None).await.0, 502);
     }
 
     #[tokio::test]

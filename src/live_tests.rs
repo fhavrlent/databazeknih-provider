@@ -53,7 +53,7 @@ fn series(book: &Value) -> (String, String) {
 #[ignore = "hits databazeknih.cz"]
 async fn live_print_edition() {
     let base = provider().await;
-    let book = get(&base, "/book/30396").await;
+    let book = get(&base, "/book/zaklinac-zaklinac-posledni-prani-30396").await;
     assert_eq!(book["providerId"], "zaklinac-zaklinac-posledni-prani-30396");
     assert_eq!(book["mediaType"], "book");
     assert_eq!(book["title"], "Poslední přání", "title (h1)");
@@ -160,6 +160,39 @@ async fn live_title_search_ranks_the_author_first() {
     assert_eq!(first["title"], "Krakatit");
     assert_eq!(first["authors"][0], "Karel Čapek");
     assert!(first["pages"].as_i64().unwrap_or(0) > 0, "pages: {first}");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_lookup_by_an_old_slug_answers_with_the_asked_id() {
+    let base = provider().await;
+    // The site redirects any slug to the current one.
+    let book = get(&base, "/book/stary-nazev-30396").await;
+    assert_eq!(book["providerId"], "stary-nazev-30396");
+    assert_eq!(book["title"], "Poslední přání");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_title_search_finds_slovak_editions() {
+    let base = provider().await;
+    let body = get(
+        &base,
+        "/search?query=Posledn%C3%A9%20%C5%BEelanie&author=Andrzej%20Sapkowski&limit=1",
+    )
+    .await;
+    let first = &matches(&body)[0];
+    assert_eq!(first["title"], "Posledné želanie");
+    assert_eq!(first["languageCode"], "sk");
+}
+
+#[tokio::test]
+#[ignore = "hits databazeknih.cz"]
+async fn live_a_search_with_no_results_says_so() {
+    let base = provider().await;
+    // An empty answer only when the site says it found nothing; otherwise this would be a 502.
+    let body = get(&base, "/search?query=qxzwvqxzwv").await;
+    assert!(matches(&body).is_empty(), "{body}");
 }
 
 #[tokio::test]

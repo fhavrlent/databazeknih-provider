@@ -107,6 +107,7 @@ pub struct MoreInfo {
 const MAX_GENRES: usize = 10;
 const MIN_PUBLISHED_YEAR: i64 = 1000;
 const MAX_PUBLISHED_YEAR: i64 = 2200;
+const NOTHING_FOUND: &str = "jsme bohužel nenašli žádný výsledek";
 
 /// Languages as the site names them in "Jazyk vydání".
 const LANGUAGES: &[(&str, &str)] = &[
@@ -182,6 +183,13 @@ pub fn search_results(html: &str) -> Vec<SearchHit> {
         });
     }
     results
+}
+
+/// Whether a search page says it found nothing: "Na hledaný výraz ... jsme bohužel nenašli žádný
+/// výsledek v kategorii Knihy." A page with no results that does not say so is a page the provider
+/// no longer understands, not an empty answer.
+pub fn says_nothing_found(html: &str) -> bool {
+    html.contains(NOTHING_FOUND)
 }
 
 /// The caption after a result's title: "1998, Jason Dark (p)", the year then the authors, with
@@ -307,12 +315,14 @@ pub fn parse_more_info(html: &str) -> MoreInfo {
     info
 }
 
-/// The answer for a book, or nothing when its page has no title or no id to file it under.
+/// The answer for a book, or nothing when its page has no title or no id to file it under. When the
+/// book was found by an ISBN, that ISBN is the one reported if the edition lists it.
 pub fn map_book(
     page: &BookPage,
     more: &MoreInfo,
     url: &str,
     fallback_id: &str,
+    searched_isbn: Option<&str>,
 ) -> Option<BookMetadata> {
     let provider_id = if page.provider_id.is_empty() {
         extract_path(url).unwrap_or_else(|| fallback_id.to_string())
@@ -322,11 +332,14 @@ pub fn map_book(
     if page.title.is_empty() || provider_id.is_empty() {
         return None;
     }
-    let (isbn10, isbn13) = split_isbn(if more.isbn.is_empty() {
-        &page.isbn
-    } else {
-        &more.isbn
-    });
+    let (isbn10, isbn13) = split_isbn(
+        if more.isbn.is_empty() {
+            &page.isbn
+        } else {
+            &more.isbn
+        },
+        searched_isbn,
+    );
     let audiobook = more.form.contains("audio");
     let comic = page
         .genres
@@ -566,20 +579,25 @@ fn map_language(raw: &str) -> Option<String> {
 }
 
 /// The first ISBN in a field, without hyphens, as (`isbn10`, `isbn13`).
-fn split_isbn(raw: &str) -> (String, String) {
-    for part in raw.split([',', ';', '/']) {
-        let isbn: String = part
-            .chars()
-            .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
-            .collect::<String>()
-            .to_uppercase();
-        match isbn.len() {
-            13 => return (String::new(), isbn),
-            10 => return (isbn, String::new()),
-            _ => {}
-        }
+fn split_isbn(raw: &str, searched: Option<&str>) -> (String, String) {
+    let isbns: Vec<String> = raw
+        .split([',', ';', '/'])
+        .map(|part| {
+            part.chars()
+                .filter(|c| c.is_ascii_digit() || *c == 'X' || *c == 'x')
+                .collect::<String>()
+                .to_uppercase()
+        })
+        .filter(|isbn| matches!(isbn.len(), 10 | 13))
+        .collect();
+    let chosen = searched
+        .and_then(|wanted| isbns.iter().find(|isbn| isbn.as_str() == wanted))
+        .or(isbns.first());
+    match chosen {
+        Some(isbn) if isbn.len() == 13 => (String::new(), isbn.clone()),
+        Some(isbn) => (isbn.clone(), String::new()),
+        None => (String::new(), String::new()),
     }
-    (String::new(), String::new())
 }
 
 #[derive(Debug, Default)]
@@ -753,7 +771,7 @@ mod tests {
     fn real_book_page() {
         let page = parse_book_page(BOOK, Some(BOOK_URL));
         let more = parse_more_info(MORE);
-        let book = map_book(&page, &more, BOOK_URL, "").unwrap();
+        let book = map_book(&page, &more, BOOK_URL, "", None).unwrap();
         assert_eq!(book.provider_id, "zaklinac-zaklinac-posledni-prani-30396");
         assert_eq!(book.media_type, "book");
         assert_eq!(book.title, "Poslední přání");
@@ -808,7 +826,7 @@ mod tests {
         let url = "https://www.databazeknih.cz/prehled-knihy/posledni-prani-537448";
         let page = parse_book_page(AUDIO, Some(url));
         let more = parse_more_info(AUDIO_MORE);
-        let book = map_book(&page, &more, url, "").unwrap();
+        let book = map_book(&page, &more, url, "", None).unwrap();
         assert_eq!(book.provider_id, "posledni-prani-537448");
         assert_eq!(book.media_type, "audiobook");
         assert_eq!(book.duration, 11 * 3600 + 56 * 60);
@@ -851,18 +869,45 @@ mod tests {
     #[test]
     fn isbns() {
         assert_eq!(
-            split_isbn("978-80-7477-079-1"),
+            split_isbn("978-80-7477-079-1", None),
             (String::new(), "9788074770791".into())
         );
         assert_eq!(
-            split_isbn("80-85951-14-2"),
+            split_isbn("80-85951-14-2", None),
             ("8085951142".into(), String::new())
         );
         assert_eq!(
-            split_isbn("80-123, 978-80-7477-079-1"),
+            split_isbn("80-123, 978-80-7477-079-1", None),
             (String::new(), "9788074770791".into())
         );
-        assert_eq!(split_isbn("123"), (String::new(), String::new()));
+        assert_eq!(split_isbn("123", None), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn an_edition_with_two_isbns_reports_the_searched_one() {
+        let both = "978-80-7477-079-1, 80-85951-14-2";
+        assert_eq!(
+            split_isbn(both, Some("8085951142")),
+            ("8085951142".into(), String::new())
+        );
+        assert_eq!(
+            split_isbn(both, Some("9788074770791")),
+            (String::new(), "9788074770791".into())
+        );
+        // An ISBN the edition does not list leaves its first one.
+        assert_eq!(
+            split_isbn(both, Some("9780000000002")),
+            (String::new(), "9788074770791".into())
+        );
+    }
+
+    #[test]
+    fn empty_search_pages_say_so() {
+        assert!(says_nothing_found(include_str!(
+            "../testdata/search-nothing.html"
+        )));
+        assert!(!says_nothing_found(SEARCH));
+        assert!(!says_nothing_found("<html><body></body></html>"));
     }
 
     #[test]
@@ -890,14 +935,14 @@ mod tests {
     #[test]
     fn a_page_without_a_title_is_no_book() {
         let page = parse_book_page("<html></html>", Some(BOOK_URL));
-        assert!(map_book(&page, &MoreInfo::default(), BOOK_URL, "").is_none());
+        assert!(map_book(&page, &MoreInfo::default(), BOOK_URL, "", None).is_none());
     }
 
     #[test]
     fn comics_are_told_by_their_genre() {
         let html = r#"<script type="application/ld+json">{"@type":"Book","name":"Maus","genre":["Komiksy"],"url":"https://www.databazeknih.cz/prehled-knihy/maus-1"}</script>"#;
         let page = parse_book_page(html, None);
-        let book = map_book(&page, &MoreInfo::default(), "u", "").unwrap();
+        let book = map_book(&page, &MoreInfo::default(), "u", "", None).unwrap();
         assert_eq!(
             (book.media_type.as_str(), book.title.as_str()),
             ("comic", "Maus")
