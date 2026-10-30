@@ -769,28 +769,32 @@ pub fn fold(value: &str) -> String {
 mod tests {
     use super::*;
 
-    const BOOK: &str = include_str!("../testdata/book-30396.html");
-    const MORE: &str = include_str!("../testdata/more-30396.html");
-    const AUDIO: &str = include_str!("../testdata/book-537448.html");
-    const AUDIO_MORE: &str = include_str!("../testdata/more-537448.html");
-    const SEARCH: &str = include_str!("../testdata/search-zaklinac.html");
+    // Synthetic pages in the site's markup; the books in them are invented.
+    const BOOK: &str = include_str!("../testdata/book-print.html");
+    const MORE: &str = include_str!("../testdata/more-print.html");
+    const AUDIO: &str = include_str!("../testdata/book-audio.html");
+    const AUDIO_MORE: &str = include_str!("../testdata/more-audio.html");
+    const SEARCH: &str = include_str!("../testdata/search-results.html");
 
     const BOOK_URL: &str =
-        "https://www.databazeknih.cz/prehled-knihy/zaklinac-zaklinac-posledni-prani-30396";
+        "https://www.databazeknih.cz/prehled-knihy/kronika-mlhy-tichy-pristav-90001";
 
     #[test]
-    fn real_search_page_lists_books_in_order_with_their_captions() {
+    fn a_search_page_lists_books_in_order_with_their_captions() {
         let hits = search_results(SEARCH);
-        assert!(hits.len() >= 20, "{}", hits.len());
+        assert_eq!(hits.len(), 20);
         assert_eq!(
             hits[0],
             SearchHit {
-                provider_id: "john-sinclair-na-stope-hruzy-zaklinac-40113".into(),
-                url: "https://www.databazeknih.cz/prehled-knihy/john-sinclair-na-stope-hruzy-zaklinac-40113".into(),
-                title: "Zaklínač".into(),
-                authors: vec!["Jason Dark".into()],
+                provider_id: "dobrodruzstvi-tichy-pristav-90101".into(),
+                url: "https://www.databazeknih.cz/prehled-knihy/dobrodruzstvi-tichy-pristav-90101"
+                    .into(),
+                title: "Tichý přístav".into(),
+                authors: vec!["Karel Jiný".into()],
             }
         );
+        // A caption with two authors.
+        assert_eq!(hits[7].authors, ["Jana Testová", "Marek Kreslený"]);
         let ids: HashSet<&str> = hits.iter().map(|h| h.provider_id.as_str()).collect();
         assert_eq!(ids.len(), hits.len());
     }
@@ -799,9 +803,10 @@ mod tests {
     fn ranking_puts_the_asked_author_first_and_keeps_the_site_order_otherwise() {
         let hits = search_results(SEARCH);
         let site_order: Vec<String> = hits.iter().map(|h| h.provider_id.clone()).collect();
-        let ranked = rank(hits, "Zaklínač", "Andrzej Sapkowski");
+        let ranked = rank(hits, "Tichý přístav", "Jana Testová");
+        assert_eq!(ranked[0].provider_id, "kronika-mlhy-tichy-pristav-90001");
         assert!(
-            ranked[0].authors.iter().any(|a| a == "Andrzej Sapkowski"),
+            ranked[0].authors.iter().any(|a| a == "Jana Testová"),
             "{:?}",
             ranked[0]
         );
@@ -833,34 +838,34 @@ mod tests {
     }
 
     #[test]
-    fn real_book_page() {
+    fn a_book_page() {
         let page = parse_book_page(BOOK, Some(BOOK_URL));
         let more = parse_more_info(MORE);
         let book = map_book(&page, &more, BOOK_URL, "", None).unwrap();
-        assert_eq!(book.provider_id, "zaklinac-zaklinac-posledni-prani-30396");
+        assert_eq!(book.provider_id, "kronika-mlhy-tichy-pristav-90001");
         assert_eq!(book.media_type, "book");
-        assert_eq!(book.title, "Poslední přání");
-        assert_eq!(book.authors, ["Andrzej Sapkowski"]);
-        assert_eq!(book.publisher, "Leonardo");
-        assert_eq!(book.published_year, "1999");
+        assert_eq!(book.title, "Tichý přístav");
+        assert_eq!(book.authors, ["Jana Testová"]);
+        assert_eq!(book.publisher, "Vzorové nakladatelství");
+        assert_eq!(book.published_year, "2001");
         assert_eq!(book.language_code, "cs");
-        assert_eq!(book.pages, 280);
+        assert_eq!(book.pages, 312);
         assert_eq!(
             (book.isbn10.as_str(), book.isbn13.as_str()),
-            ("8085951142", "")
+            ("8090000010", "")
         );
-        assert_eq!(book.genres, ["Literatura světová", "Povídky", "Fantasy"]);
+        assert_eq!(book.genres, ["Literatura česká", "Povídky", "Fantasy"]);
         assert_eq!(
             book.series,
             [Series {
-                series: "Zaklínač".into(),
+                series: "Kronika mlhy".into(),
                 sequence: "1".into()
             }]
         );
-        assert_eq!((book.rating, book.rating_count), (Some(4.6), Some(7748)));
+        assert_eq!((book.rating, book.rating_count), (Some(4.3), Some(2468)));
         assert_eq!(
             book.cover,
-            "https://www.databazeknih.cz/img/books/30_/30396/big_posledni-prani-APM-30396.gif?v=1595550371"
+            "https://www.databazeknih.cz/img/books/90_/90001/big_tichy-pristav-Tst-90001.gif?v=1600000000"
         );
         assert_eq!(book.url, BOOK_URL);
         assert!(book.narrators.is_empty());
@@ -868,37 +873,37 @@ mod tests {
     }
 
     #[test]
-    fn real_description_is_whole_with_its_line_breaks() {
+    fn the_description_is_whole_with_its_line_breaks() {
         let page = parse_book_page(BOOK, None);
         let d = &page.description;
-        assert!(d.starts_with("Nově přeložené geraltovské povídky"), "{d}");
-        assert!(
-            d.contains("jak to všechno začalo.\n\nZaklínač, ošlehaný muž"),
-            "{d}"
-        );
+        assert!(d.starts_with("Sbírka povídek z přístavního města"), "{d}");
+        assert!(d.contains("nikdy nezvedne.\n\nKaždý příběh začíná"), "{d}");
         // The hidden rest of the text is there, the link that reveals it is not.
-        assert!(
-            d.contains("Povídky:\nCesta, z níž není návratu\nHlas rozumu 1"),
-            "{d}"
-        );
-        assert!(d.ends_with("Hlas rozumu 7"), "{d}");
+        assert!(d.contains("Obsah:\nPrvní molo\nMezihra 1"), "{d}");
+        assert!(d.ends_with("Mezihra 3"), "{d}");
+        // Longer than the structured data's shortened copy.
+        assert!(d.chars().count() > 160, "{d}");
         assert!(!d.contains("celý text"), "{d}");
         assert!(!d.contains("Co říkají"), "{d}");
     }
 
     #[test]
-    fn real_audiobook_edition() {
-        let url = "https://www.databazeknih.cz/prehled-knihy/posledni-prani-537448";
+    fn an_audiobook_edition() {
+        let url = "https://www.databazeknih.cz/prehled-knihy/tichy-pristav-90002";
         let page = parse_book_page(AUDIO, Some(url));
         let more = parse_more_info(AUDIO_MORE);
         let book = map_book(&page, &more, url, "", None).unwrap();
-        assert_eq!(book.provider_id, "posledni-prani-537448");
+        assert_eq!(book.provider_id, "tichy-pristav-90002");
         assert_eq!(book.media_type, "audiobook");
-        assert_eq!(book.duration, 11 * 3600 + 56 * 60);
-        assert_eq!(book.narrators.len(), 33);
-        assert_eq!(book.narrators[0], "Petra Horváthová");
+        assert_eq!(book.duration, 9 * 3600 + 41 * 60);
+        assert_eq!(book.narrators.len(), 12);
+        assert_eq!(book.narrators[0], "Alena Zkušební");
         assert_eq!(book.pages, 0);
-        assert_eq!(book.series[0].series, "Zaklínač");
+        assert_eq!(book.series[0].series, "Kronika mlhy");
+        assert_eq!(
+            book.cover,
+            "https://www.databazeknih.cz/img/books/90_/90002/big_tichy-pristav-a1b2c3d4e5f60.jpg?v=1700000000"
+        );
     }
 
     #[test]
@@ -907,8 +912,8 @@ mod tests {
         assert_eq!(
             more,
             MoreInfo {
-                page_count: Some(280),
-                isbn: "80-85951-14-2".into(),
+                page_count: Some(312),
+                isbn: "80-900000-1-0".into(),
                 language: "cs".into(),
                 form: "klasická kniha".into(),
                 narrators: vec![],
@@ -949,19 +954,20 @@ mod tests {
     }
 
     #[test]
-    fn a_real_edition_with_three_isbns() {
-        let more = parse_more_info(include_str!("../testdata/more-470637.html"));
+    fn an_edition_with_three_isbns() {
+        // The site lists them comma-separated in the details, as about one edition in twenty does.
+        let more = parse_more_info(include_str!("../testdata/more-three-isbns.html"));
         assert_eq!(
             more.isbn,
-            "978-80-7335-323-0, 978-80-7335-520-3, 978-80-87440-58-2"
+            "978-80-900000-2-5, 978-80-900000-3-2, 978-80-900010-0-8"
         );
         assert_eq!(
-            split_isbn(&more.isbn, Some("9788087440582")),
-            (String::new(), "9788087440582".into())
+            split_isbn(&more.isbn, Some("9788090001008")),
+            (String::new(), "9788090001008".into())
         );
         assert_eq!(
             split_isbn(&more.isbn, None),
-            (String::new(), "9788073353230".into())
+            (String::new(), "9788090000025".into())
         );
     }
 

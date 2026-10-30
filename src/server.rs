@@ -928,27 +928,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_search_fetches_five_books() {
+    async fn a_full_search_page_fetches_five_books() {
         let fake = Fake::with(&[(
             "/vyhledavani/knihy",
             200,
-            include_str!("../testdata/search-zaklinac.html"),
+            include_str!("../testdata/search-results.html"),
         )]);
-        let hits = search_results(include_str!("../testdata/search-zaklinac.html"));
+        let hits = search_results(include_str!("../testdata/search-results.html"));
         for hit in &hits {
             fake.pages.lock().unwrap().insert(
                 hit.url.trim_start_matches(crate::databazeknih::SITE).into(),
-                (200, include_str!("../testdata/book-30396.html").into()),
+                (200, include_str!("../testdata/book-print.html").into()),
             );
         }
         fake.pages.lock().unwrap().insert(
-            "/book-detail-more-info/30396".into(),
-            (200, include_str!("../testdata/more-30396.html").into()),
+            "/book-detail-more-info/90001".into(),
+            (200, include_str!("../testdata/more-print.html").into()),
         );
         let base = provider(fake.clone()).await;
-        let (status, body, _) = get(&base, "/search?query=Zakl%C3%ADna%C4%8D&limit=10", None).await;
+        let (status, body, _) = get(
+            &base,
+            "/search?query=Tich%C3%BD%20p%C5%99%C3%ADstav&limit=10",
+            None,
+        )
+        .await;
         assert_eq!((status, matches(&body).len()), (200, 5));
-        assert_eq!(matches(&body)[0]["pages"], 280);
+        assert_eq!(matches(&body)[0]["pages"], 312);
+        // The search page, then each book's page and details; a title match needs no Slovak search.
         assert_eq!(fake.requests().len(), 11);
     }
 
@@ -1097,38 +1103,38 @@ mod tests {
 
     #[tokio::test]
     async fn an_isbn_search_reports_the_searched_isbn_of_an_edition_with_several() {
-        // A real edition of "Emma" lists three ISBNs in its details; its page's structured data
-        // has only the first. The site's search sends each of them to this edition.
+        // An edition listing three ISBNs in its details; its page's structured data has only the
+        // first. The site's search sends each of them to this edition.
         let fake = Fake::with(&[
             (
-                "/prehled-knihy/emma-470637",
+                "/prehled-knihy/vzorova-kniha-90003",
                 200,
-                r#"<div id="bookDetail"><h1 class="oddown_zero">Emma</h1></div>
-                <script type="application/ld+json">{ "@type": "Book", "isbn": "978-80-7335-323-0",
-                "url": "https://www.databazeknih.cz/prehled-knihy/emma-470637" }</script>"#,
+                r#"<div id="bookDetail"><h1 class="oddown_zero">Vzorová kniha</h1></div>
+                <script type="application/ld+json">{ "@type": "Book", "isbn": "978-80-900000-2-5",
+                "url": "https://www.databazeknih.cz/prehled-knihy/vzorova-kniha-90003" }</script>"#,
             ),
             (
-                "/book-detail-more-info/470637",
+                "/book-detail-more-info/90003",
                 200,
-                include_str!("../testdata/more-470637.html"),
+                include_str!("../testdata/more-three-isbns.html"),
             ),
         ]);
-        for isbn in ["9788073353230", "9788073355203", "9788087440582"] {
+        for isbn in ["9788090000025", "9788090000032", "9788090001008"] {
             fake.pages.lock().unwrap().insert(
                 format!("/vyhledavani/knihy?q={isbn}&lang=cz"),
-                (302, "redirect:/prehled-knihy/emma-470637".into()),
+                (302, "redirect:/prehled-knihy/vzorova-kniha-90003".into()),
             );
         }
         let base = provider(fake).await;
         for (asked, reported) in [
-            ("978-80-7335-323-0", "9788073353230"),
-            ("978-80-7335-520-3", "9788073355203"),
-            ("978-80-87440-58-2", "9788087440582"),
+            ("978-80-900000-2-5", "9788090000025"),
+            ("978-80-900000-3-2", "9788090000032"),
+            ("978-80-900010-0-8", "9788090001008"),
         ] {
             let (status, body, _) = get(&base, &format!("/search?isbn={asked}"), None).await;
             assert_eq!((status, matches(&body).len()), (200, 1), "{asked}: {body}");
             assert_eq!(matches(&body)[0]["isbn13"], reported, "{asked}");
-            assert_eq!(matches(&body)[0]["providerId"], "emma-470637");
+            assert_eq!(matches(&body)[0]["providerId"], "vzorova-kniha-90003");
         }
     }
 

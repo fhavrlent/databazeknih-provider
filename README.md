@@ -124,29 +124,18 @@ Or in a container, with no local toolchain:
 docker run --rm -v "$PWD":/src -w /src rust:1.90-alpine sh -c 'apk add --no-cache musl-dev && cargo test'
 ```
 
-The tests run offline against a stand-in for the site. The fixtures in `testdata/` are real
-databazeknih.cz pages captured on 2026-10-28: a search for "Zaklínač", the print edition of
-"Poslední přání" (30396) and its audiobook edition (537448), each with its details fragment. They
-are cut down to the parts the provider reads, plus the site's summary of reader comments next to
-the description, which the tests check stays out of it.
+The tests run offline against a stand-in for the site; nothing in them contacts databazeknih.cz.
+The fixtures in `testdata/` are synthetic pages in the site's markup, with invented books, people
+and texts: a search results page, a print edition and an audiobook edition with their details
+fragments, an edition listing three ISBNs, and an empty results page. They keep what the provider
+depends on: the classes, the structured data and its escaping, the line breaks of the blurb and
+its hidden "... celý text" part, the series box, the details rows, and the site's summary of reader
+comments next to the description, which the tests check stays out of it.
 
-Those fixtures do not change when databazeknih.cz does, so live tests check the real site too:
-well-known books keep their title, author, series, pages, ISBN, cover, narrators and running time;
-ISBN searches (real, made up, placeholders, several per edition) answer only editions that list
-the ISBN; Czech searches answer the site's own Czech results; Slovak titles are found; limits
-hold; unknown ids are not found.
-
-The real site cannot be made to fail, so fault tests put a small proxy in front of it: every page
-is the site's own, fetched live, and only the failure under test is injected, such as a
-redesigned results page, a reworded "nothing found", a slow or failing book page, a maintenance
-redirect, a `429` or an unreachable site. `cargo test` skips both; run them with:
-
-```bash
-cargo test live -- --ignored --test-threads=1
-```
-
-The `Publish` workflow runs them, with the offline tests, before it builds an image, so a release that fails them is never published. The `Live` workflow runs them every day and on demand, about fifteen requests to the site, and
-GitHub emails a failure. Each check names the part of the page it reads, such as `series box`.
+The stand-in also plays the site's failures: a redesigned results page, a page that no longer says
+it found nothing, a slow or failing book page, a redirect to a maintenance page, a `429`, and an
+unreachable site. The `Publish` workflow runs every test before it builds an image, so a release
+that fails them is never published.
 
 Before a release, check it with BookOrbit's conformance checker:
 
