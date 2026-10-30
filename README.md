@@ -16,7 +16,7 @@ Beside BookOrbit, on the same Docker network:
 ```yaml
 services:
   databazeknih:
-    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.2
+    image: ghcr.io/fhavrlent/databazeknih-provider:0.1.3
     restart: unless-stopped
 ```
 
@@ -30,7 +30,7 @@ has the steps. No account or key is needed. To build it yourself:
 | `PORT` | `8080` | |
 | `AUTH_TOKEN` | unset | When set, `/search` and `/book/{id}` require this exact `Authorization` header |
 | `DATABAZEKNIH_SITE` | `https://www.databazeknih.cz` | Where pages are fetched from; links in answers always point at databazeknih.cz |
-| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.2` | |
+| `USER_AGENT` | `bookorbit-databazeknih-provider/0.1.3` | |
 | `DEADLINE_MS` | `8000` | How long a search or lookup may take. A search that runs out answers with the books it has, marked partial. Raise it if you raise the provider's timeout in BookOrbit (10 seconds by default) |
 
 databazeknih.cz is a community site, so the provider sends it at most two requests at a time, at
